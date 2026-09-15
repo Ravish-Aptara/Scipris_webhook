@@ -375,7 +375,7 @@
             <div id="cb-window">
                 <div id="cb-header">
                     <div class="cb-header-left">
-                        <div class="cb-avatar">🤖</div>
+                        <div class="cb-avatar">⭐</div>
                         <div class="cb-title-container">
                             <span class="cb-main-title" id="cb-agent-title">Sophia AI Agent</span>
                             <span class="cb-sub-title"><span class="cb-status-dot"></span> Online</span>
