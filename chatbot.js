@@ -449,42 +449,97 @@
         let selectedFile = null;
         let chatSocket = null;
         let isLiveSupport = false;
+        let inactivityTimer = null;
+        const INACTIVITY_TIMEOUT = 5 * 60 * 1000; // 5 minutes
 
         const chatBubbleSvg = '<path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2z"/>';
         const chevronDownSvg = '<path d="M7.41 8.59L12 13.17l4.59-4.58L18 10l-6 6-6-6 1.41-1.41z"/>';
 
-        // 4. WebSocket Connection for Live Support
-        function connectWebSocket() {
+        // Inactivity Timer Manager (closes WebSocket after 5 min of no messages/activity)
+        function resetInactivityTimer() {
+            if (inactivityTimer) {
+                clearTimeout(inactivityTimer);
+                inactivityTimer = null;
+            }
+            if (isLiveSupport && chatSocket && (chatSocket.readyState === WebSocket.OPEN || chatSocket.readyState === WebSocket.CONNECTING)) {
+                inactivityTimer = setTimeout(closeLiveSupportDueToInactivity, INACTIVITY_TIMEOUT);
+            }
+        }
+
+        function closeLiveSupportDueToInactivity() {
+            if (inactivityTimer) {
+                clearTimeout(inactivityTimer);
+                inactivityTimer = null;
+            }
+            if (chatSocket) {
+                console.log("Closing Live Support WebSocket due to 5 minutes of inactivity.");
+                const ws = chatSocket;
+                chatSocket = null; // Clear reference so onclose doesn't auto-reconnect
+                try {
+                    ws.close();
+                } catch (e) {
+                    console.warn("Error closing WebSocket:", e);
+                }
+            }
+            isLiveSupport = false;
+            if (agentTitle) agentTitle.textContent = "Sophia AI Agent";
+            addMessage("Live support session closed due to 5 minutes of inactivity. You are now back with Sophia AI.", "bot");
+        }
+
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 2;
+
+        // 4. WebSocket Connection for Live Support (ONLY opened when live chat is called)
+        function openLiveSupportWebSocket() {
+            if (chatSocket && (chatSocket.readyState === WebSocket.OPEN || chatSocket.readyState === WebSocket.CONNECTING)) {
+                resetInactivityTimer();
+                return;
+            }
+
             try {
+                isLiveSupport = true;
+                if (agentTitle) agentTitle.textContent = "Live Support Agent";
+
                 const wsUrl = `${WS_BASE}/ws/chat/${sessionId}/`;
                 chatSocket = new WebSocket(wsUrl);
 
+                chatSocket.onopen = function() {
+                    reconnectAttempts = 0;
+                    resetInactivityTimer();
+                };
+
                 chatSocket.onmessage = function(e) {
+                    resetInactivityTimer();
                     try {
                         const data = JSON.parse(e.data);
                         if (data.sender === 'support' || data.role === 'support') {
-                            isLiveSupport = true;
-                            agentTitle.textContent = "Live Support Agent";
                             hideTyping();
                             addMessage(data.message, 'support');
                         }
                     } catch (err) {
-                        console.error('Error handling WS message:', err);
+                        // ignore malformed ws message
                     }
                 };
 
-                chatSocket.onclose = function() {
-                    setTimeout(connectWebSocket, 5000);
+                chatSocket.onclose = function(e) {
+                    // Avoid looped reconnect spam: only retry if still in live support and within retry limit
+                    if (isLiveSupport && chatSocket && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                        reconnectAttempts++;
+                        setTimeout(() => {
+                            if (isLiveSupport && chatSocket) openLiveSupportWebSocket();
+                        }, 5000);
+                    } else if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+                        closeLiveSupportDueToInactivity();
+                    }
                 };
 
-                chatSocket.onerror = function(err) {
-                    console.warn('WebSocket error:', err);
+                chatSocket.onerror = function() {
+                    // Silent fail to avoid loop spam
                 };
             } catch (err) {
-                console.error('Failed to init WebSocket:', err);
+                // Silent fail
             }
         }
-        connectWebSocket();
 
         // 5. Text Formatter (Markdown helper)
         function formatMessageText(text) {
@@ -554,11 +609,13 @@
                         messagesContainer.appendChild(typingIndicator);
 
                         data.history.forEach(msg => {
-                            let text = '';
-                            if (msg.parts && Array.isArray(msg.parts)) {
-                                text = msg.parts.map(p => (typeof p === 'string' ? p : p.text || '')).join('');
-                            } else if (typeof msg.parts === 'string') {
-                                text = msg.parts;
+                            let text = msg.text || '';
+                            if (!text && msg.parts) {
+                                if (Array.isArray(msg.parts)) {
+                                    text = msg.parts.map(p => (typeof p === 'string' ? p : p.text || '')).join('');
+                                } else if (typeof msg.parts === 'string') {
+                                    text = msg.parts;
+                                }
                             }
                             if (text) {
                                 const role = msg.role === 'user' ? 'user' : (msg.role === 'support' ? 'support' : 'bot');
@@ -567,8 +624,7 @@
                         });
                     }
                     if (data.needs_support) {
-                        isLiveSupport = true;
-                        agentTitle.textContent = "Live Support Agent";
+                        openLiveSupportWebSocket();
                     }
                 }
             } catch (e) {
@@ -591,6 +647,7 @@
                 selectedFile = e.target.files[0];
                 fileNameSpan.textContent = selectedFile.name;
                 filePreview.style.display = 'flex';
+                resetInactivityTimer();
             }
         });
 
@@ -605,6 +662,8 @@
         async function sendMessage() {
             let text = chatInput.value.trim();
             if (!text && !selectedFile) return;
+
+            resetInactivityTimer();
 
             let uploadedFilename = null;
 
@@ -673,6 +732,11 @@
 
                     const reply = data.reply || data.response || data.message || "I didn't receive a response.";
                     addMessage(reply, 'bot');
+
+                    // If backend indicates Live Support was requested/ticket created, open WebSocket
+                    if (data.needs_support) {
+                        openLiveSupportWebSocket();
+                    }
                 } catch (error) {
                     hideTyping();
                     addMessage('Error: Server unreachable. Please try again later.', 'bot');
@@ -705,6 +769,8 @@
         chatInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') sendMessage();
         });
+
+        chatInput.addEventListener('input', resetInactivityTimer);
     }
 
     if (document.readyState === 'loading') {
